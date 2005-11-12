@@ -1,0 +1,1046 @@
+#!/bin/sh
+exec /usr/bin/perl -x $0 "$@";
+#!perl
+
+
+# +----------------------------------------------------------------------------+
+# | Jogger - Jabber Web Logging Component                          Version 0.8 |
+# +----------------------------------------------------------------------------+
+# |                                                                            |
+# |  Jogger is an external Jabber (www.jabber.org) component that simply logs  |
+# |  messages that are sent to it in a MySQL database, allowing you to use     |
+# |  Jabber for your own custom weblog (or Jog, as we call it).                |
+# |                                                                            |
+# +----------------------------------------------------------------------------+
+# |                                                                            |
+# |                    Jogger - Jabber Web Logging Component                   |
+# |            Copyright (C) 2001, Justin Mecham <justin@aspect.net>           |
+# |                                                                            |
+# | This program is free software; you can redistribute it and/or modify it    |
+# | under the terms of the GNU General Public License as published by the Free |
+# | Software Foundation; either version 2 of the License, or (at your option)  |
+# | any later version.                                                         |
+# |                                                                            |
+# | This program is distributed in the hope that it will be useful, but        |
+# | WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY |
+# | or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License   |
+# | for more details.                                                          |
+# |                                                                            |
+# | You should have received a copy of the GNU General Public License along    |
+# | with this program; if not, write to the Free Software Foundation, Inc.,    |
+# |	59 Temple Place, Suite 330, Boston, MA 02111-1307 USA                      |
+# |                                                                            |
+# +----------------------------------------------------------------------------+
+
+my $VERSION = "0.9";
+
+# +----------------------------------------------------------------------------+
+# | Declare Global Variables                                                   |
+# +----------------------------------------------------------------------------+
+
+my %config;
+my %lang;
+my @routes;
+my $dbh;
+my $timer;
+my $status;
+my $pos;
+my $tracedate;
+my $codehour;
+my $fortunescount;
+my $fortunehour;
+my $jogstatus;
+
+# +----------------------------------------------------------------------------+
+# | Load Modules                                                               |
+# +----------------------------------------------------------------------------+
+
+use strict;
+use utf8;
+use Net::Jabber 1.0024 qw(Component);
+use XML::Stream qw(Tree);
+use DBI;
+use Getopt::Long;
+use Unicode::String;
+use Encode 'from_to';
+
+
+# +----------------------------------------------------------------------------+
+# | Load Command Line Arguments                                                |
+# +----------------------------------------------------------------------------+
+
+my %optctl = ();
+$optctl{config}	= "config.xml";
+&GetOptions(\%optctl, "config=s");
+
+my $pid = '/var/run/jogger.pid';
+
+if (open PIDF, ">$pid") {
+    print PIDF "$$\n";
+    close PIDF;
+}
+else {
+    warn "Can't write to PID file: $!\n";
+}
+
+# +----------------------------------------------------------------------------+
+# | Load Configuration                                                         |
+# +----------------------------------------------------------------------------+
+
+&loadConfig();
+
+
+
+# +----------------------------------------------------------------------------+
+# | Initialize Debug System                                                    |
+# +----------------------------------------------------------------------------+
+
+my $debug = new Net::Jabber::Debug( level  => $config{debug}->{level},
+                                    header => "Jogger",
+                                    time   => 1);
+
+
+
+# +----------------------------------------------------------------------------+
+# | Declare Signal Intercepts                                                  |
+# +----------------------------------------------------------------------------+
+# | Configure a subroutine to be called when a HUP, KILL, TERM, or INT signal  |
+# | is received so that we may shut things down gracefully.                    |
+# +----------------------------------------------------------------------------+
+
+$SIG{HUP}	= \&Shutdown;
+$SIG{KILL}	= \&Shutdown;
+$SIG{TERM}	= \&Shutdown;
+$SIG{INT}	= \&Shutdown;
+
+
+
+# +----------------------------------------------------------------------------+
+# | Create Component                                                           |
+# +----------------------------------------------------------------------------+
+
+my $component = new Net::Jabber::Component(debuglevel=>$config{debug}->{level});
+
+$component->SetCallBacks(	message		=> \&messageCB,
+							presence	=> \&presenceCB,
+							iq			=> \&iqCB);
+
+
+
+# +----------------------------------------------------------------------------+
+# | Connect to Jabber Server                                                   |
+# +----------------------------------------------------------------------------+
+
+if (!connectJabber()) {
+	$debug->Log0("(ERROR) Unable to connect to Jabber server ($config{server}->{hostname}) ...");
+	$debug->Log0("        (".$component->GetErrorCode(),")");
+	exit(0);
+}
+
+$debug->Log0("Connected to Jabber server ($config{server}->{hostname}) ...");
+
+
+
+# +----------------------------------------------------------------------------+
+# | Connect to Database Server                                                 |
+# +----------------------------------------------------------------------------+
+
+if (!connectDatabase())
+{
+	$debug->Log0("(ERROR) Unable to connect to MySQL database (".$config{mysql}->{server}."@".$config{mysql}->{server}.")");
+	exit(0);
+}
+
+$debug->Log0("Connected to MySQL database (".$config{mysql}->{dbname}."@".$config{mysql}->{server}.") ...");
+
+sub showstatus
+{
+    my $onlyfortune	= shift;
+    my $id;
+    my $roster;
+    my $fortune;
+    my $jid;
+    my $body;
+    my $fromjid;
+    my $max;
+    my $i;
+    my $query;
+
+    if ($onlyfortune == 1) {
+        $query = "SELECT jid, roster, fortune FROM jogs WHERE (fortune = '1' AND status <> '0')";
+    
+    } else {
+	$query = "SELECT jid, roster, fortune FROM jogs";
+    }
+    
+    my $sth = $dbh->prepare($query);
+    while (!$sth->execute) {
+	die "mysql";
+	
+	$sth->finish();
+
+	connectDatabase();
+    
+	my $sth = $dbh->prepare($query);
+    }
+    
+    $max=$sth->rows;
+    if ($max>0) {
+        for ($i=1;$i<=$max;$i++)
+	{
+	    ($jid, $roster, $fortune) = $sth->fetchrow_array();
+	    if ($roster eq "") {
+		$roster = "blog\@$config{page}->{rootdomain}";
+	    }
+
+	    if ($fortune == 1) {
+		$component->PresenceSend(to=>$jid, from=>$roster, show=>"away", priority=>10, status=>"$jogstatus");
+	    } else {
+		$component->PresenceSend(to=>$jid, from=>$roster, show=>"away", priority=>10);
+	    }
+        }
+    }
+}
+
+
+# +----------------------------------------------------------------------------+
+# | Maintain Connection                                                        |
+# +----------------------------------------------------------------------------+
+
+my $connected = 1;
+my $sendpresence = 1;
+
+$fortunehour = -1;
+
+while ($connected == 1) {
+
+	while ($status = $component->Process()) { }
+
+    if (!defined($status)) {
+
+        $connected = 0;
+
+        $debug->Log0("Connection to Jabber server ($config{server}->{hostname}) has been lost ...");
+    
+        if ($config{server}->{connectiontype} eq "tcpip")
+        {
+            for my $count (1..20)
+            {
+                sleep(30);
+
+                $debug->Log0("Attempting to reconnect (${count}/20) ...");
+
+				if (connectJabber()) {
+					$debug->Log0("Connection has been re-established ...");
+					$connected = 1;
+					last;
+				}
+				else
+				{
+					$debug->Log0("(ERROR) Unable to re-establish connection to Jabber Server ($config{server}->{hostname}) - ".$component->GetErrorCode());
+				}
+			}
+			if ($connected == 0)
+			{
+				$debug->Log0("(ERROR) Unable to re-establish connection to Jabber server ($config{server}->{hostname}) - ".$component->GetErrorCode());
+				exit(0);
+			}
+		}
+	}
+
+
+}
+
+$debug->Log0("(ERROR) Exiting ...");
+
+unlink($pid);
+
+exit(0);
+
+sub checkout
+{
+    my $id;
+    my $jid;
+    my $body;
+    my $roster;
+    my $max;
+    my $i;
+    my $jog_id;
+    my $langid;
+    
+    my $sth = $dbh->prepare("SELECT * FROM outgoing");
+    while (!$sth->execute) {
+	die "mysql";
+	$sth->finish();
+
+	connectDatabase();
+	
+	my $sth = $dbh->prepare("SELECT * FROM outgoing");
+    }
+
+    $langid = $config{page}->{lang};
+
+    $max=$sth->rows;
+    if ($max>0) {
+	for ($i=1;$i<=$max;$i++)
+	{
+	    ($id, $jog_id, $jid, $body) = $sth->fetchrow_array();
+	    $dbh->do("DELETE FROM outgoing WHERE id='$id'");
+	    
+	    my $sth2 = $dbh->prepare("SELECT roster FROM jogs WHERE id='$jog_id'");
+	    while (!$sth2->execute) {
+	die "mysql";
+		$sth2->finish();
+	    
+		connectDatabase();
+
+		my $sth2 = $dbh->prepare("SELECT roster FROM jogs WHERE id='$jog_id'");
+	    }
+
+	    if ($sth2->rows != 0) {
+		($roster) = $sth2->fetchrow_array();
+	    } else {
+		$roster = "blog\@$config{page}->{rootdomain}";
+	    }
+	    
+	    $component->MessageSend(to=>$jid, from=>$roster, body=>$body, subject=>"$lang{$langid}->{subject}");	
+	}
+    }
+}
+
+sub sendnotify
+{
+    my $trace_id	= shift;
+    my $level		= shift;
+    my $jog_id;
+    my $i;
+    my $max;
+    my $roster;
+    my $jid;
+    my $tracejid;
+    my $body;
+    my $domain;
+    my $langid;
+    my $query;
+    
+    if ($level < 2) {
+	$query = "SELECT jog_id FROM tracejog WHERE trace_id='$trace_id'";
+    } else {
+	$query = "SELECT tracejog.jog_id, loginlevel.user FROM tracejog, loginlevel WHERE tracejog.trace_id='$trace_id' AND loginlevel.jog_id='$trace_id' AND tracejog.jog_id = loginlevel.user_jogid AND loginlevel.level >= '$level'";
+    }
+
+    my $sth = $dbh->prepare($query);
+    while (!$sth->execute) {
+	die "mysql";
+	$sth->finish();
+	
+	connectDatabase();
+    
+        my $sth = $dbh->prepare($query);
+    }
+    
+    $langid = $config{page}->{lang};
+
+    $max=$sth->rows;
+    if ($max>0) {
+    for ($i=1;$i<=$max;$i++)
+    {
+	($jog_id) = $sth->fetchrow_array();
+	    
+	my $sth2 = $dbh->prepare("SELECT jid, roster FROM jogs WHERE id='$jog_id'");
+	while (!$sth2->execute) {
+	die "mysql";
+	    $sth2->finish();
+	    
+	    connectDatabase();
+	
+	    my $sth2 = $dbh->prepare("SELECT jid, roster FROM jogs WHERE id='$jog_id'");
+	}
+
+	($jid, $roster) = $sth2->fetchrow_array();
+	if ($roster eq "") {
+	    $roster = "blog\@$config{page}->{rootdomain}";
+	}
+	
+	my $sth2 = $dbh->prepare("SELECT jid, domain FROM jogs WHERE (id = '$trace_id')");		
+	while (!$sth2->execute) {
+	die "mysql";
+	    $sth2->finish();
+	    
+	    connectDatabase();
+	    
+	    my $sth2 = $dbh->prepare("SELECT jid, domain FROM jogs WHERE (id = '$trace_id')");		
+	}
+
+	if ($sth2->rows != 0)
+	{
+	    ($tracejid, $domain) = $sth2->fetchrow_array();
+	}
+	$sth2->finish();
+	
+	$body = $lang{$langid}->{newentry};
+	$body =~ s/<HREF>/http:\/\/$domain.$config{page}->{rootdomain}\//;
+	
+	$component->MessageSend(to=>$jid, from=>$roster, body=>$body, subject=>"$lang{$langid}->{subject}");	
+    }
+    }
+    $sth->finish();
+}
+
+
+# +----------------------------------------------------------------------------+
+# | Load Configuration Settings                                                |
+# +----------------------------------------------------------------------------+
+sub loadConfig
+{
+
+	my $parser = new XML::Stream::Parser(style=>"Tree");
+	my @tree = $parser->parsefile($optctl{config});
+
+	# +------------------------------------------------------------------------+
+	# | Jabber Server Settings                                                 |
+	# +------------------------------------------------------------------------+
+	my @serverTree						= &XML::Stream::GetXMLData("tree", $tree[0], "server", "", "");
+	$config{server}->{hostname}			= &XML::Stream::GetXMLData("value", \@serverTree, "hostname", "", "");
+	$config{server}->{port}				= &XML::Stream::GetXMLData("value", \@serverTree, "port", "", "");
+	$config{server}->{secret}			= &XML::Stream::GetXMLData("value", \@serverTree, "secret", "", "");
+	$config{server}->{connectiontype}	= &XML::Stream::GetXMLData("value", \@serverTree, "connectiontype", "", "");
+	$config{server}->{connectiontype}	= "tcpip" 
+
+	if ($config{server}->{connectiontype} eq "");
+
+	# +------------------------------------------------------------------------+
+	# | Component Settings                                                     |
+	# +------------------------------------------------------------------------+
+	my @componentTree					= &XML::Stream::GetXMLData("tree", $tree[0], "component", "", "");
+	$config{component}->{name}			= &XML::Stream::GetXMLData("value", \@componentTree, "name", "", "");
+
+	# +------------------------------------------------------------------------+
+	# | Database Settings                                                      |
+	# +------------------------------------------------------------------------+
+	my @mysqlTree						= &XML::Stream::GetXMLData("tree", $tree[0], "mysql", "", "");
+	$config{mysql}->{server}			= &XML::Stream::GetXMLData("value", \@mysqlTree, "server", "", "");
+	$config{mysql}->{dbname}			= &XML::Stream::GetXMLData("value", \@mysqlTree, "dbname", "", "");
+	$config{mysql}->{username}			= &XML::Stream::GetXMLData("value", \@mysqlTree, "username", "", "");
+	$config{mysql}->{password}			= &XML::Stream::GetXMLData("value", \@mysqlTree, "password", "", "");
+
+	my @pageTree						= &XML::Stream::GetXMLData("tree", $tree[0], "page", "", "");
+	$config{page}->{lang}				= &XML::Stream::GetXMLData("value", \@pageTree, "lang", "", "");
+	$config{page}->{rootsite}			= &XML::Stream::GetXMLData("value", \@pageTree, "rootsite", "", "");
+	$config{page}->{rootdomain}			= &XML::Stream::GetXMLData("value", \@pageTree, "rootdomain", "", "");
+
+	# +------------------------------------------------------------------------+
+	# | Debug Settings                                                         |
+	# +------------------------------------------------------------------------+
+	my @debugTree						= &XML::Stream::GetXMLData("tree", $tree[0], "debug", "", "");
+	$config{debug}->{level}				= &XML::Stream::GetXMLData("value", \@debugTree, "level", "", "");
+#	$config{debug}->{file}				= &XML::Stream::GetXMLData("value", \@debugTree, "file", "", "");
+
+}
+
+
+
+# +----------------------------------------------------------------------------+
+# | Handle <message/> Packets                                                  |
+# +----------------------------------------------------------------------------+
+sub messageCB
+{
+	my $sid		= shift;
+	my $message	= shift;
+	my $from	= lc($message->GetFrom("jid")->GetJID());
+	my $to		= lc($message->GetTo("jid")->GetJID());
+	my $subject	= $message->GetSubject();
+	my $bodyorg	= $message->GetBody();
+	my $type	= $message->GetType();
+	my $xmlns       = $message->GetEnvelope();
+	my $jog_id;
+	my $subscribed;
+	my $rndpwd;
+	my $pass;
+	my $i;
+	my $domain;
+	my $body;
+	my $body3;
+	my $jid_redirect;
+	my $jid;
+	my $roster;
+	my $entries;
+	my $level;
+	my $block;
+	my $langid;
+	my $oldsubject;
+	my $oldbody;
+	my $chng;
+	my $nocomment;
+	my $fortune;
+	my $estat;
+	my $minlevel;
+
+
+	$langid    = $config{page}->{lang};
+
+	if ((not($type eq "error")) && ($xmlns eq "")) {
+
+
+		if ($bodyorg) {
+		
+	
+		    $subject = $dbh->quote($subject);
+		    $body    = $dbh->quote($bodyorg);
+		    $jid     = $from;
+		    $roster  = $to;
+		    $entries = 0;
+		    $level   = 0;
+		    $block   = 0;
+		    $nocomment = 0;
+		    $block = 0;
+		    $minlevel = 0;
+
+		    $debug->Log0("bodyorg: ",$from," (",$bodyorg,")");
+
+		    my $sth = $dbh->prepare("SELECT jog_id FROM jids WHERE (jid = '$from' AND confirm = '')");
+		    while (!$sth->execute) {
+	die "mysql";
+			$sth->finish();
+			
+			connectDatabase();
+			
+			my $sth = $dbh->prepare("SELECT jog_id FROM jids WHERE (jid = '$from' AND confirm = '')");		
+		    }
+
+		    if ($sth->rows != 0)
+		    {
+			($jog_id) = $sth->fetchrow_array();
+			my $sth = $dbh->prepare("SELECT jid, roster, subscribed, domain, level, minlevel, block, entries, fortune FROM jogs WHERE (id = '$jog_id')");
+			while (!$sth->execute) {
+			    	die "mysql";
+$sth->finish();
+			    
+			    connectDatabase();
+			    
+			    my $sth = $dbh->prepare("SELECT jid, roster, subscribed, domain, level, minlevel, block, entries, fortune FROM jogs WHERE (id = '$jog_id')");
+			}
+
+			($jid, $roster, $subscribed, $domain, $level, $minlevel, $block, $entries, $fortune) = $sth->fetchrow_array();
+		    }
+		    else
+		    {
+			$dbh->do("INSERT INTO jogs SET jid = '$from', roster = '$to', langpage = '$config{page}->{lang}', created = NOW()");	
+			my $sth_jog_id = $dbh->prepare("SELECT id FROM jogs WHERE (jid='$from') ");
+			while (!$sth_jog_id->execute) {
+			    	die "mysql";
+$sth_jog_id->finish();
+			    
+			    connectDatabase();
+
+			    my $sth_jog_id = $dbh->prepare("SELECT id FROM jogs WHERE (jid='$from') ");
+			}
+
+			$dbh->do("UPDATE stat SET jogs=jogs+1");
+			    
+			($jog_id) = $sth_jog_id->fetchrow_array();
+			$sth_jog_id->finish();
+			
+			$domain = "new$jog_id";
+			$dbh->do("UPDATE jogs SET domain = '$domain' WHERE id = '$jog_id'");
+			$dbh->do("INSERT INTO jids SET jid = '$from', jog_id = '$jog_id', jog_primary = '1'");
+
+			$body3=$lang{$langid}->{newinfo};
+			$body3 =~ s/<HREF>/$config{page}->{rootsite}/;
+			 
+			$component->MessageSend(to=>$from, from=>$to, type=>$type, body=>$body3);
+		    }
+		    
+		    $sth->finish();
+		
+		    $chng = 1;
+		    
+		    while ($chng == 1) {
+			
+			$chng = 0;
+			
+			$body    = $dbh->quote($bodyorg);			    
+			$body =~ s/^\s+//;
+#		$body =~ s/\s+//;
+			
+			if (uc(substr($bodyorg,0,6)) eq "<PASS>") {
+			    $chng = 1;
+		    $debug->Log0("bodyorg: INPASS");
+			    
+			    $bodyorg = substr($bodyorg, 6);
+			    
+			    for ($i=1;$i<7;$i++) {
+	    			$rndpwd = chr(65+rand(25));
+				$pass = $pass.$rndpwd;
+			    }
+			    
+			    $dbh->do("UPDATE jogs SET pass = MD5('$pass') WHERE (id = '$jog_id')");
+		    
+			    if (not($to eq $roster)) {
+				$dbh->do("UPDATE jogs SET roster = '$to' WHERE (id = '$jog_id')");
+			    }
+		    	
+			    $body3 = $lang{$langid}->{pass};
+			    $body3 =~ s/<PASS>/$pass/;
+			    $body3 =~ s/<HREF>/$config{page}->{rootsite}/;
+
+			    $component->MessageSend(to=>$from, from=>$to, type=>$type, body=>$body3);
+			}
+
+			if (uc(substr($bodyorg,0,6)) eq "<PING>") {
+			    $chng = 1;
+			    
+			    $bodyorg = substr($bodyorg, 6);
+			    
+			    $component->MessageSend(to=>$from, from=>$to, type=>$type, body=>"PONG!");
+			}
+		    
+			if (uc(substr($bodyorg,0,4)) eq "<NC>") {
+			    $chng = 1;
+			    
+			    $bodyorg = substr($bodyorg, 4);
+			    
+			    $nocomment = 1;
+			}
+
+			if (uc(substr($bodyorg,0,6)) eq "<LEVEL") {
+			    my $pos = index $bodyorg, ">";
+			    if ($pos > 6) {
+			
+				$chng = 1;
+			    
+				my $level2 = substr($bodyorg, 6, $pos - 6);
+
+    				$bodyorg = substr($bodyorg, $pos + 1);
+			    
+				if ($level2 >= 0 && $level2 <=10) {
+				    $level = $level2;
+				}
+			    } 
+			}
+
+		    }
+		    
+		    if ($minlevel > $level ) {
+			$level = $minlevel;
+		    }
+		    
+		    if ($block > 0) {
+			$body = "Jogger zostal zablokowany";
+			$component->MessageSend(to=>$from, from=>$to, type=>$type, body=>$body);
+			$bodyorg = "";
+		    }
+		    
+		    if ($bodyorg) {
+		    
+			my $sth = $dbh->prepare("SELECT subject, body FROM entries WHERE (jog_id = '$jog_id') ORDER BY id DESC LIMIT 1");
+			while (!$sth->execute) {
+			    	die "mysql";
+$sth->finish();
+			    
+			    connectDatabase();
+
+			    my $sth = $dbh->prepare("SELECT subject, body FROM entries WHERE (jog_id = '$jog_id') ORDER BY id DESC LIMIT 1");
+			}
+			
+			$oldsubject = "";
+			$oldbody = "";
+
+			if ($sth->rows != 0)
+			{
+			    ($oldsubject, $oldbody) = $sth->fetchrow_array();
+			    $oldbody = $dbh->quote($oldbody);
+			    $oldsubject = $dbh->quote($oldsubject);
+			}
+
+			if ($oldsubject ne $subject || $oldbody ne $body) {
+			
+			    $dbh->do("LOCK TABLES stat WRITE, jogs WRITE, entries WRITE");
+			    
+			    if ($level == 0) {
+				$dbh->do("UPDATE stat, jogs SET jogs.entries=jogs.entries+1, stat.entries=stat.entries+1, stat.sortid=stat.sortid+1 WHERE (id = '$jog_id')");
+
+				my $sth2 = $dbh->prepare("SELECT sortid FROM stat");
+				while (!$sth2->execute) {
+				    	die "mysql";
+$sth2->finish();
+				    
+				    connectDatabase();
+
+				    my $sth2 = $dbh->prepare("SELECT sortid FROM stat");
+				}
+
+				($estat) = $sth2->fetchrow_array();
+			    }
+			    else
+			    {
+				$dbh->do("UPDATE stat, jogs SET jogs.entries=jogs.entries+1, stat.entries=stat.entries+1 WHERE (id = '$jog_id')");
+				
+				$estat = 0;
+			    }
+			    
+			    $dbh->do("INSERT INTO entries SET sortid = '$estat', jid = '$jid', jog_id = '$jog_id', level = '$level', nocomment = '$nocomment', date = NOW(), subject = $subject, body = $body");
+			    
+			    $dbh->do("UNLOCK TABLES");
+
+			    $body = $lang{$langid}->{message};
+			    $body =~ s/<HREF>/http:\/\/$domain.$config{page}->{rootdomain}/;
+			
+			    $component->MessageSend(to=>$from, from=>$to, type=>$type, body=>$body);
+
+			    sendnotify($jog_id, $level);
+			}
+		    }
+		}
+		else
+		{
+#		    $component->MessageSend(to=>$from, from=>$to, type=>$type, body=>"Error: You must specify a message to be jogged.");
+		}
+	}
+    
+	checkout;
+}
+
+
+
+# +----------------------------------------------------------------------------+
+# | Handle <presence/> Packets                                                 |
+# +----------------------------------------------------------------------------+
+sub presenceCB
+{
+	my $sid			= shift;
+	my $presence	= shift;
+	my $type		= $presence->GetType();
+	my $to			= $presence->GetTo("jid")->GetJID();
+	my $from		= $presence->GetFrom("jid")->GetJID();
+	my $statustxt		= $dbh->quote($presence->GetStatus());
+	my $jog_id;
+	my $DAY;
+	my $HOUR;
+	my $fortuneid;
+	my $fortune;
+
+	$debug->Log0("presenceCB: presence(",$presence->GetXML(),")");
+	
+	($DAY) = (localtime)[3];
+	if ($tracedate != $DAY) {
+	    $debug->Log0("CHECKTRACE", $DAY);
+	    $dbh->do("DELETE FROM traceentry WHERE date < DATE_SUB(NOW(), interval 14 day)");
+	    $tracedate = $DAY;
+	}
+
+	($HOUR) = (localtime)[2];
+	if ($codehour != $HOUR) {
+	    $debug->Log0("CHECKCODES", $HOUR);
+	    $dbh->do("DELETE FROM codes WHERE date < DATE_SUB(NOW(), interval 2 hour)");
+	    $codehour = $HOUR;
+	}
+	
+	($HOUR) = (localtime)[2];
+	if ($fortunehour != $HOUR) {
+	    $debug->Log0("FORTUNE", $HOUR);
+	    
+	    $fortuneid = rand($fortunescount);
+	    
+	    my $sth = $dbh->prepare("SELECT text FROM fortune LIMIT $fortuneid,1");
+	    while (!$sth->execute) {
+			die "mysql";
+$sth->finish();
+		
+		connectDatabase();
+		
+		my $sth = $dbh->prepare("SELECT text FROM fortune LIMIT $fortuneid,1");
+	    }
+
+	    if ($sth->rows != 0)
+	    {
+		($jogstatus) = $sth->fetchrow_array();
+		
+		from_to($jogstatus, "iso-8859-2", "utf-8");
+		
+		if ($sendpresence == 1) {
+		    $sendpresence = 0;
+
+		    showstatus (0);
+		} else {
+		    showstatus (1);
+		}
+	    }    
+	    
+	    $fortunehour = $HOUR;
+	}
+
+	$debug->Log0("presenceCB 2");
+
+	if (not($type eq "error")) {
+	    my $sth = $dbh->prepare("SELECT a.jog_id, b.fortune FROM jids as a, jogs as b WHERE (a.jid = '$from' AND a.confirm = '' AND a.jog_primary = 1 AND a.jog_id = b.id)");
+	    while (!$sth->execute) {
+			die "mysql";
+$sth->finish();
+		
+		connectDatabase();
+		
+		my $sth = $dbh->prepare("SELECT a.jog_id, b.fortune FROM jids as a, jogs as b WHERE (a.jid = '$from' AND a.confirm = '' AND a.jog_primary = 1 AND a.jog_id = b.id)");
+	    }
+
+$debug->Log0("presenceCB 3");
+
+	    if ($sth->rows != 0)
+	    {
+		($jog_id, $fortune) = $sth->fetchrow_array();
+
+$debug->Log0("presenceCB 4");
+
+    		if ($type eq "probe")
+		{
+		    if ($fortune == 1) {
+			$component->PresenceSend(to=>$from, from=>$to, show=>"away", priority=>10, status=>"$jogstatus");
+		    } else {
+			$component->PresenceSend(to=>$from, from=>$to, show=>"away", priority=>10);
+		    }
+		    
+		    $dbh->do("UPDATE jogs SET roster = '$to' WHERE (id = '$jog_id')");
+		}
+
+$debug->Log0("presenceCB 5");
+
+		# +------------------------------------------------------------------------+
+		# | User unsubscribes us from their presence                               |
+		# +------------------------------------------------------------------------+
+		if ($type eq "unsubscribe")
+		{
+$debug->Log0("presenceCB 6");
+		    $debug->Log0("(Presence) Jogger is no longer subscribed to $from");
+		    $dbh->do("UPDATE jogs SET subscribed = 'no' WHERE (id = '$jog_id')");
+		}
+
+
+		# +------------------------------------------------------------------------+
+		# | User accespts our subscription request                                 |
+		# +------------------------------------------------------------------------+
+		elsif ($type eq "subscribe")
+		{
+$debug->Log0("presenceCB 7");
+		    $debug->Log0("(Presence) Jogger is now subscribed to $from");
+#		    if ($fortune == 1) {
+#			$component->PresenceSend(to=>$from, from=>$to, show=>"away", priority=>10, status=>"$jogstatus");
+#		    } else {
+			$component->PresenceSend(to=>$from, from=>$to, type=>"subscribed");
+			$component->PresenceSend(to=>$from, from=>$to, type=>"subscribe");
+			$component->PresenceSend(to=>$from, from=>$to, show=>"away", priority=>10);
+#		    }
+
+		    $dbh->do("UPDATE jogs SET roster='$to', subscribed = 'yes' WHERE (id = '$jog_id')");
+		}
+
+
+		# +------------------------------------------------------------------------+
+		# | User has become unavailable                                            |
+		# +------------------------------------------------------------------------+
+		elsif ($type eq "unavailable" || $type eq "hidden")
+		{
+$debug->Log0("presenceCB 8");
+		    $debug->Log0("(Presence) $from is now unavailable");
+		    $dbh->do("UPDATE jogs SET status = '0', statustxt = '' WHERE (id = '$jog_id')");
+		}
+
+		# +------------------------------------------------------------------------+
+		# | Request subscription from unsubscribed user                            |
+		# +------------------------------------------------------------------------+
+		else
+		{
+$debug->Log0("presenceCB 10");
+		    $debug->Log0("(Presence) $from has changed their presence, sending ours...");
+
+		    if ($type eq "") {
+			$dbh->do("UPDATE jogs SET status = '1', statustxt = $statustxt WHERE (id = '$jog_id')");
+		    }
+		}
+	    }
+	}
+
+$debug->Log0("presenceCB 11");
+	checkout;
+$debug->Log0("presenceCB 12");
+
+}
+
+# +----------------------------------------------------------------------------+
+# | Handle <iq/> Packets                                                       |
+# +----------------------------------------------------------------------------+
+sub iqCB {
+
+	my $sid		= shift;
+	my $iq		= shift;
+	my $type	= $iq->GetType();
+	my $query	= $iq->GetQuery();
+	my $iqReply = $iq->Reply(template=>"component", type=>"result");
+
+	$debug->Log0("iqCB: iq(".$iq->GetXML().")");
+
+	if (not($type eq "error")) {
+	    if (!$query)
+	    {
+		return;
+	    }
+    
+	    # +------------------------------------------------------------------------+
+	    # | jabber:iq:version                                                      |
+	    # +------------------------------------------------------------------------+
+	    if ($query->GetXMLNS() eq "jabber:iq:version")
+	    {
+		my $iqReplyQuery = $iqReply->NewQuery("jabber:iq:version");
+		
+		my $os = `uname -s -r`;
+		chomp($os);
+
+		$iqReplyQuery->SetVersion(name=>"Jogger", ver=>$VERSION, os=>$os);
+	    }
+
+	    # +------------------------------------------------------------------------+
+	    # | jabber:iq:last                                                         |
+	    # +------------------------------------------------------------------------+
+	    elsif ($query->GetXMLNS() eq "jabber:iq:last")
+	    {
+		my $iqReplyQuery = $iqReply->NewQuery("jabber:iq:last");
+		
+		$iqReplyQuery->SetSeconds(timerValue());
+	    }
+
+	    # +------------------------------------------------------------------------+
+	    # | Send <iq/> Reply                                                       |
+	    # +------------------------------------------------------------------------+
+	    if ($iqReply ne "") {
+		$debug->Log0("iqCB: reply(",$iqReply->GetXML(),")");
+		$component->Send($iqReply);
+	    } else {
+		$debug->Log0("iqCB: no reply");
+	    }
+	}
+
+    checkout;
+
+}
+
+
+
+# +----------------------------------------------------------------------------+
+# | Connect to Jabber Server                                                   |
+# +----------------------------------------------------------------------------+
+
+sub connectJabber
+{
+    if (($config{server}->{connectiontype} eq "tcpip") || ($config{server}->{connectiontype} eq "accept"))
+    {
+        $status = $component->Connect(hostname      => $config{server}->{hostname},
+                                      port          => $config{server}->{port},
+                                      secret        => $config{server}->{secret},
+                                      componentname => $config{component}->{name});
+    }
+    
+    if (($config{server}->{connectiontype} eq "stdinout") || ($config{server}->{connectiontype} eq "exec"))
+    {
+        $status = $component->Connect(connectiontype=>"exec");
+    }
+
+	if (!defined($status))
+	{
+    	return 0; 
+	}
+
+	timerStart();
+
+	return 1;
+}
+
+
+
+# +----------------------------------------------------------------------------+
+# | Connect to Database Server                                                 |
+# +----------------------------------------------------------------------------+
+
+sub connectDatabase
+{
+	my $langid;
+	my $subject;
+	my $pass;
+	my $message;
+	my $newinfo;
+	my $newentry;
+	my $error;
+
+	$debug->Log0("Connecting to database ...");
+
+	if (defined($dbh))
+	{
+	    $dbh->disconnect();
+	}
+
+	while (!defined($dbh)) {
+    	    $dbh = DBI->connect("DBI:mysql:database=$config{mysql}->{dbname}:$config{mysql}->{server}",
+						$config{mysql}->{username}, $config{mysql}->{password});
+	    sleep(20);
+	}
+	
+	$dbh->trace(2) if (($config{debug}->{level} > 0) && defined($dbh));
+
+	my $sth = $dbh->prepare("SELECT lang, subject, pass, message, newinfo, newentry, error FROM config");		
+	$sth->execute;
+
+	while (($langid, $subject, $pass, $message, $newinfo, $newentry, $error) = $sth->fetchrow_array())
+	{
+	    $lang{$langid}->{subject}  = $subject;
+	    $lang{$langid}->{pass}     = $pass;
+	    $lang{$langid}->{message}  = $message;
+	    $lang{$langid}->{newinfo}  = $newinfo;
+	    $lang{$langid}->{newentry} = $newentry;
+	    $lang{$langid}->{error}    = $error;
+	}
+	$sth->finish();
+
+	my $sth = $dbh->prepare("SELECT COUNT(*) FROM fortune");		
+	$sth->execute;
+	
+	$fortunescount = $sth->fetchrow_array();
+
+	$sth->finish();
+
+	$debug->Log0("Connected.");
+
+	return 1;
+
+}
+
+# +----------------------------------------------------------------------------+
+# | Start Uptime Timer                                                         |
+# +----------------------------------------------------------------------------+
+
+sub timerStart
+{
+	$timer = time();
+
+	return 1;
+}
+
+# +----------------------------------------------------------------------------+
+# | Get Elapsed Time                                                           |
+# +----------------------------------------------------------------------------+
+
+sub timerValue
+{
+	return time() - $timer;
+}
+
+
+
+# +----------------------------------------------------------------------------+
+# | Handle Shutdown Gracefully                                                 |
+# +----------------------------------------------------------------------------+
+sub Shutdown
+{
+	$debug->Log0("Disconnecting from Jabber server ($config{server}->{hostname}) ...");
+	$component->Disconnect();
+	$debug->Log0("Disconnecting from MySQL server ($config{mysql}->{server}) ...");	
+	$dbh->disconnect();
+	exit(0);
+}

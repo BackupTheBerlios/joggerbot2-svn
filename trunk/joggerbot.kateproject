@@ -1,0 +1,11 @@
+[Dir doc]
+Dirs=
+Files=jogger
+
+[Project Dir]
+Dirs=doc
+Files=joggerbot.py/config.py
+
+[Project File]
+Name=JoggerBot
+Type=Default
