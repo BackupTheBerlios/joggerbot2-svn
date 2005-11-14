@@ -1,0 +1,25 @@
+<config>
+        <server>
+                <connectiontype>tcpip</connectiontype>
+                <hostname>127.0.0.1</hostname>
+                <port>5226</port>
+                <secret>pass</secret>
+        </server>
+        <component>
+                 <name>jogger.pl</name>
+        </component>
+        <mysql>
+                <server>localhost</server>
+                <dbname>jogger</dbname>
+                <username>joggerbot</username>
+                <password>pass</password>
+        </mysql>
+        <page>
+                <lang>pl</lang>
+                <rootdomain>jogger.pl</rootdomain>
+                <rootsite>http://jogger.pl/</rootsite>
+        </page>
+        <debug>
+                <level>0</level>
+        </debug>
+</config>
