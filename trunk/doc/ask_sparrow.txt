@@ -1,0 +1,6 @@
+$Id$
+
+2005-11-16
+==========
+* How current logging is done? Does it logs to stdout, or elsewhere? How should it be done (system logging facility, file)?
+* Is there any server we could test the component on?

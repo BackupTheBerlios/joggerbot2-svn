@@ -22,21 +22,32 @@
 __revision__ = '$Id$'
 
 import sys
+import logging
+from optparse import OptionParser
 
-import pyxmpp
-from pyxmpp.jabberd.component import Component, ComponentError
-
-class Bot(Component):
-    
-    def __init__(self, config):
-        Component.__init__(self)
-        self.cfg = config
-
+def parseCmdline():
+    parser = OptionParser()
+    parser.add_option('-c', '--config-file', dest='configFile',
+        help='Configuration file name')
+    options, args = parser.parse_args()
+    if options.configFile is None:
+        parser.print_help()
+        sys.exit('Not enough command line arguments')
+    return options
 
 if __name__ == '__main__':
-    import config
-    cfg = config.Config(sys.argv[1])
-    try:
-        joggerbot = Bot()
-    finally:
-        cfg.close()
+    import config, bot
+    opts = parseCmdline()
+    logger = logging.getLogger('joggerbot')
+    # only for debug purposes
+    if sys.platform == 'win32':
+        logHandler = logging.FileHandler('joggerbot.log')
+    else:
+        logHandler = logging.SysLogHandler()
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    logHandler.setFormatter(formatter)
+    logger.addHandler(logHandler)
+    logger.setLevel(logging.DEBUG)
+    cfg = config.Config(opts.configFile)
+    joggerbot = bot.Bot(cfg, logger)
+    #joggerbot.loop()

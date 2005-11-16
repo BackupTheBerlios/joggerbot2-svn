@@ -50,6 +50,15 @@ class Config:
                     optionNode.nodeType == Node.ELEMENT_NODE:
                 ret = self._getText(optionNode.childNodes)
         return ret
+    
+    def getOptions(self, section):
+        """Get dictionary of options and values in specified section."""
+        options = {}
+        elements = self.dom.getElementsByTagName(section)[0].childNodes
+        for node in elements:
+            if node.nodeType == Node.ELEMENT_NODE:
+                options[node.localName] = self._getText(node.childNodes)
+        return options
 
     def close(self):
         """Defensive, as some Python implementations have problems with
