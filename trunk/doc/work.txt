@@ -1,0 +1,8 @@
+$Id$
+
+Workflow
+
+2005-11-17
+==========
+
+* Logging should be done to ordinal text file (preferably /var/log/joggerbot.log or similar);
