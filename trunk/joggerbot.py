@@ -38,16 +38,12 @@ def parseCmdline():
 if __name__ == '__main__':
     import config, bot
     opts = parseCmdline()
+    cfg = config.Config(opts.configFile)    
     logger = logging.getLogger('joggerbot')
-    # only for debug purposes
-    if sys.platform == 'win32':
-        logHandler = logging.FileHandler('joggerbot.log')
-    else:
-        logHandler = logging.SysLogHandler()
+    logHandler = logging.FileHandler(cfg.getOption('debug', 'file'))
     formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
     logHandler.setFormatter(formatter)
     logger.addHandler(logHandler)
     logger.setLevel(logging.DEBUG)
-    cfg = config.Config(opts.configFile)
     joggerbot = bot.Bot(cfg, logger)
     #joggerbot.loop()

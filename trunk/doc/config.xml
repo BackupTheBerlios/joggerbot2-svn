@@ -21,5 +21,6 @@
         </page>
         <debug>
                 <level>0</level>
+                <file>/var/log/joggerbot.log</file>
         </debug>
 </config>
