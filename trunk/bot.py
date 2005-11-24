@@ -32,6 +32,8 @@ from pyxmpp.jabberd.component import Component, ComponentError
 class Bot(Component):
     
     def __init__(self, config, logger):
+        """Create instance and initialize from configuration options.
+        Also set logger to global default one."""
         self.serverOpts = config.getOptions('server')
         self.mysqlOpts = config.getOptions('mysql')
         self.compOpts = config.getOptions('component')
@@ -41,7 +43,9 @@ class Bot(Component):
             secret=self.serverOpts['secret'],
             server=self.serverOpts['hostname'],
             port=int(self.serverOpts['port']),
-            disco_name=self.compOpts['name'])
+            disco_name=self.compOpts['name'],
+            disco_category='x-service')
+        self.disco_info.add_feature('jabber:iq:version')
         logger.info('JoggerBot initializing...')
         self.cfg = config
         self.logger = logger
@@ -56,11 +60,31 @@ class Bot(Component):
             signal.signal(sign, self.shutdown)
         self._connectServer()
         self._connectDB()
-    
+
+    ### internal service methods ###
     def _connectServer(self):
         pass
     
     def _connectDB(self):
+        pass
+
+    ### event handlers ###
+    def authenticated(self):
+        Component.authenticated(self)
+        # set up handlers for supported <iq/> queries
+        self.stream.set_iq_get_handler('query', 'jabber:iq:version', self.getVersionQuery)
+        self.stream.set_iq_get_handler('query', 'jabber:iq:register', self.getRegisterQuery)
+        self.stream.set_iq_set_handler('query', 'jabber:iq:register', self.setRegisterQuery)
+        self.stream.set_iq_get_handler('query', 'jabber:iq:last', self.onLastQuery)        
+        # set up handlers for <presence/> stanzas
+        self.stream.set_presence_handler('available', self.onPresence)
+        self.stream.set_presence_handler('subscribe', self.onSubscribe)
+        self.stream.set_presence_handler('unsubscribe', self.onUnsubscribe)
+        # set up handler for <message stanza>
+        self.stream.set_message_handler('normal', self.onMessage)
+
+    ### stanza handlers ###
+    def getVersionQuery(self, stanza):
         pass
 
     def shutdown(self, sigNum, frame):
