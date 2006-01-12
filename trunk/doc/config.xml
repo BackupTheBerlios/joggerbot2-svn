@@ -4,6 +4,8 @@
                 <hostname>127.0.0.1</hostname>
                 <port>5226</port>
                 <secret>pass</secret>
+                <!-- new in 2.0! -->
+                <attempts>20</attempts>
         </server>
         <component>
                  <name>jogger.pl</name>

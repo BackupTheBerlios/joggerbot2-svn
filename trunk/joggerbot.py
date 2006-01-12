@@ -46,4 +46,5 @@ if __name__ == '__main__':
     logger.addHandler(logHandler)
     logger.setLevel(logging.DEBUG)
     joggerbot = bot.Bot(cfg, logger)
-    #joggerbot.loop()
+    joggerbot.connect()
+    joggerbot.loop(1)
