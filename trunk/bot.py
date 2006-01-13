@@ -93,10 +93,10 @@ class Bot(Component):
         self.stream.set_iq_set_handler('query', 'jabber:iq:register', self.setRegisterQuery)
         self.stream.set_iq_get_handler('query', 'jabber:iq:last', self.onLastQuery)        
         # set up handlers for <presence/> stanzas
-        self.stream.set_presence_handler('available', self.onPresence)
-        self.stream.set_presence_handler('subscribe', self.onSubscribe)
         self.stream.set_presence_handler('probe', self.onProbe)
-        self.stream.set_presence_handler('unsubscribe', self.onUnsubscribe)
+        self.stream.set_presence_handler('available', self.onPresence)
+        self.stream.set_presence_handler('subscribe', self.onSubscriptionChange)
+        self.stream.set_presence_handler('unsubscribe', self.onSubscriptionChange)
         # set up handler for <message stanza>
         self.stream.set_message_handler('normal', self.onMessage)
     
@@ -136,24 +136,37 @@ class Bot(Component):
     
     def onPresence(self, stanza):
         self.logger.debug('Got presence data %s' % stanza.serialize())
+        p = Presence(
+            stanza_type = stanza.get_type(),
+            to_jid = stanza.get_from(),
+            from_jid = stanza.get_to(),
+            show = None
+        )
+        self.stream.send(p)
     
-    def onSubscribe(self, stanza):
-        self.logger.info('User %s subscribed' % stanza.get_from().as_utf8())
+    def onSubscriptionChange(self, stanza):
         p = stanza.make_accept_response()
         self.stream.send(p)
-        return True
-    
-    def onUnsubscribe(self, stanza):
-        p = stanza.make_accept_response()
-        self.stream.send(p)
-        self.logger.info('User %s unsubscribed' % stanza.get_from().as_utf8())
+        fromUser = stanza.get_from().as_utf8()
+        msg = None
+        stanzaType = stanza.get_type()
+        self.logger.debug('Got stanza %s from %s' % (stanzaType, fromUser))
+        if stanza.get_type() == 'subscribe':
+            msg = 'User %s subscribed' % fromUser
+        elif stanza.get_type() == 'unsubscribe':
+            msg = 'User %s unsubscribed' % fromUser
+        if msg:
+            self.logger.info(msg)
         return True
     
     def onProbe(self, stanza):
         pass
     
     def onMessage(self, stanza):
-        pass
+        toJid = stanza.get_to()
+        toUser = toJid.node
+        toResource = toJid.resource
+        self.logger.debug('Got message to %s and resource %s' % (toUser, toResource))
         
     def exit(self):
         if self.stream:
