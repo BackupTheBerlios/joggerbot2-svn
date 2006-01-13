@@ -22,7 +22,7 @@
 
 __revision__ = '$Id$'
 
-import sys, time, signal
+import platform, sys, time, signal
 
 if sys.platform == 'win32':
     from pysqlite2 import dbapi2 as db
@@ -43,16 +43,22 @@ class Bot(Component):
         self.compOpts = config.getOptions('component')
         # initialize component
         logger.info('JoggerBot component initializing')
-        Component.__init__(self, 
-            JID(self.compOpts['name']),
-            self.serverOpts['secret'],
-            self.serverOpts['hostname'],
-            int(self.serverOpts['port']),
-            disco_name=self.compOpts['name'],
-            disco_category='x-service',
+        name = self.compOpts['name']
+        secret = self.serverOpts['secret']
+        serverHostname = self.serverOpts['hostname']
+        port = int(self.serverOpts['port'])
+        try:
+            fullName = self.compOpts['fullname']
+        except KeyError:
+            # using old configuration data
+            self.logger.warning('Old configuration data is used')
+            fullName = name
+        Component.__init__(self, JID(name), secret, serverHostname, port,
+            disco_name=fullName, disco_category='x-service',
             disco_type='x-jogger')
         self.disco_info.add_feature('jabber:iq:version')
         logger.info('JoggerBot component initialized')
+        self.startTime = time.time()
         self.cfg = config
         self.logger = logger
         # the signals we should respond to with graceful exit
@@ -80,7 +86,7 @@ class Bot(Component):
         self.logger.info('JoggerBot connected to its database')
 
     def stream_state_changed(self, state, arg):
-        self.logger.info('*** State changed: %s %r' % (state, arg))
+        self.logger.debug('State changed: %s %r' % (state, arg))
 
     ### event handlers ###
     def authenticated(self):
@@ -102,7 +108,12 @@ class Bot(Component):
     
     def disconnected(self):
         self.logger.warning('Connection to XMPP/Jabber server %s has been lost' % self.serverOpts['hostname'])
-        attempts = int(self.serverOpts['attempts'])
+        try:
+            attempts = int(self.serverOpts['attempts'])
+        except KeyError:
+            # using old configuration data
+            self.logger.warning('Old configuration data is used')
+            attempts = 20
         for i in range(attempts):
             time.sleep(30)
             self.logger.info('Attempting to reconnect (%d/%d)' % (i+1, attempts))
@@ -122,6 +133,12 @@ class Bot(Component):
         q = stanza.new_query('jabber:iq:version')
         q.newTextChild(q.ns(), 'name', 'Jogger.pl bot')
         q.newTextChild(q.ns(), 'version', '2.0')
+        osData = platform.uname()
+        if osData[0].lower() == 'windows':
+            osName = osData[0] + ' '.join(platform.win32_ver())
+        else:
+            osName = ' '.join(osData)
+        q.newTextChild(q.ns(), 'os', osName)
         self.stream.send(stanza)
         return True
     
@@ -132,7 +149,11 @@ class Bot(Component):
         pass
     
     def onLastQuery(self, stanza):
-        pass
+        stanza = stanza.make_result_response()
+        q = stanza.new_query('jabber:iq:last')
+        q.newTextChild(q.ns(), 'seconds', str(time.time() - self.startTime))
+        self.stream.send(stanza)
+        return True
     
     def onPresence(self, stanza):
         self.logger.debug('Got presence data %s' % stanza.serialize())

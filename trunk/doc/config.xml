@@ -2,13 +2,15 @@
         <server>
                 <connectiontype>tcpip</connectiontype>
                 <hostname>127.0.0.1</hostname>
-                <port>5226</port>
-                <secret>pass</secret>
+                <port>10015</port>
+                <secret>secret</secret>
                 <!-- new in 2.0! -->
                 <attempts>20</attempts>
         </server>
         <component>
-                 <name>jogger.pl</name>
+                 <!-- new in 2.0! -->
+                 <fullname>Jogger.pl bot</fullname>
+                 <name>jogger.127.0.0.1</name>
         </component>
         <mysql>
                 <server>localhost</server>
@@ -23,6 +25,6 @@
         </page>
         <debug>
                 <level>0</level>
-                <file>/var/log/joggerbot.log</file>
+                <file>joggerbot.log</file>
         </debug>
 </config>
