@@ -181,7 +181,13 @@ class Bot(Component):
         return True
     
     def onProbe(self, stanza):
-        pass
+        p = Presence(
+            stanza_type = stanza.get_type(),
+            to_jid = stanza.get_from(),
+            from_jid = stanza.get_to(),
+            show = None
+        )
+        self.stream.send(p)
     
     def onMessage(self, stanza):
         toJid = stanza.get_to()
